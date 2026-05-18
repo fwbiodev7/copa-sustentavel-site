@@ -27,31 +27,57 @@ const MATERIAL_RULES = {
 };
 
 // =====================================================
-// INICIALIZAÇÃO — sincroniza times que estiverem faltando
+// INICIALIZAÇÃO — sincroniza times e garante pontos corretos
 // =====================================================
 async function initDB() {
-    const snap = await db.collection('teams').get();
-    const existingIds = snap.docs.map(doc => doc.id);
+    const [teamsSnap, donationsSnap] = await Promise.all([
+        db.collection('teams').get(),
+        db.collection('donations').get()
+    ]);
+    
+    const existingIds = teamsSnap.docs.map(doc => doc.id);
+    const existingTeams = {};
+    teamsSnap.docs.forEach(doc => existingTeams[doc.id] = doc.data());
+
+    // Calcula os pontos reais a partir do histórico de doações
+    const calculatedPoints = {};
+    donationsSnap.docs.forEach(d => {
+        const don = d.data();
+        if (don.team_id) {
+            calculatedPoints[don.team_id] = (calculatedPoints[don.team_id] || 0) + (don.points_awarded || 0);
+        }
+    });
     
     const batch = db.batch();
-    let added = 0;
+    let addedOrUpdated = 0;
     
     TEAMS_INITIAL.forEach(t => {
+        const correctPoints = calculatedPoints[t.id] || 0;
+
         if (!existingIds.includes(t.id)) {
+            // Time não existe: criar com os pontos calculados
             const ref = db.collection('teams').doc(t.id);
             batch.set(ref, {
                 name:         t.name,
                 country:      t.country,
-                total_points: 0,
+                total_points: correctPoints,
                 created_at:   firebase.firestore.FieldValue.serverTimestamp()
             });
-            added++;
+            addedOrUpdated++;
+        } else {
+            // Time existe: verificar se os pontos estão sincronizados
+            const currentPoints = existingTeams[t.id].total_points || 0;
+            if (currentPoints !== correctPoints) {
+                const ref = db.collection('teams').doc(t.id);
+                batch.update(ref, { total_points: correctPoints });
+                addedOrUpdated++;
+            }
         }
     });
     
-    if (added > 0) {
+    if (addedOrUpdated > 0) {
         await batch.commit();
-        console.log(`✅ ${added} times adicionados ao Firestore!`);
+        console.log(`✅ ${addedOrUpdated} times criados/sincronizados no Firestore!`);
     }
 }
 
